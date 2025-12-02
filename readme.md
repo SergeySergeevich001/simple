@@ -170,3 +170,54 @@ graph TB
 - **PostgreSQL 15+** как основная БД
 
 Система обеспечивает полную совместимость с существующим Hasura API NT_Planner при сохранении возможности горизонтального масштабирования.
+
+```mermaid
+sequenceDiagram
+    participant C as Клиент
+    participant F as FastAPI
+    participant A as Ariadne
+    participant R as Резолвер
+    participant S as SQLAlchemy
+    participant P as PostgreSQL
+    participant CM as Менеджер кэша
+    participant RD as Redis
+
+    C->>F: POST /graphql<br/>X-Hasura-User-Id: ...<br/>X-Hasura-Role: ...
+    Note over F: 1. Парсинг запроса
+    F->>F: Извлечение заголовков<br/>user_id, role
+    F->>F: Создание контекста запроса
+    
+    Note over F: 2. Валидация GraphQL
+    F->>A: GraphQL запрос + контекст
+    A->>A: Парсинг и валидация схемы
+    A->>R: Вызов резолвера planned_tasks
+    
+    Note over R: 3. Проверка кэша
+    R->>CM: build_cache_key(где: author_id={_eq:...})
+    CM->>RD: GET planned_tasks:select:hash123
+    RD-->>CM: null (кэш miss)
+    CM-->>R: Нет в кэше
+    
+    Note over R: 4. Запрос к БД с RLS
+    R->>S: query(PlannedTask).filter(...)
+    S->>S: Применение RLS политик<br/>для роли "сетевой_инженер"
+    S->>S: Фильтр: author_id == user_id
+    S->>S: Применение CLS (скрытие столбцов)
+    S->>P: SELECT * FROM planned_tasks<br/>WHERE author_id = '...'
+    P-->>S: Данные (3 записи)
+    
+    Note over R: 5. Кэширование результатов
+    S-->>R: Результаты
+    R->>CM: set(planned_tasks:select:hash123, данные, TTL=300)
+    CM->>RD: SETEX planned_tasks:select:hash123 300 ...
+    
+    Note over R: 6. Обработка вложенных запросов
+    R->>S: Запрос planned_task_works для каждой задачи
+    S->>P: SELECT * FROM planned_task_works WHERE planned_task_id IN (...)
+    P-->>S: Результаты
+    S-->>R: Вложенные данные
+    
+    R-->>A: Форматированные данные
+    A-->>F: GraphQL ответ
+    F-->>C: HTTP 200 JSON
+```
